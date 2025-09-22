@@ -11,9 +11,11 @@ from datetime import datetime, timedelta
 st.sidebar.title("AI Trading Dashboard")
 ticker = st.sidebar.text_input("Ticker Symbol", value="AAPL")
 start_date = st.sidebar.date_input("Start Date", datetime.now() - timedelta(days=180))
-today = datetime.today() 
-end_date = st.sidebar.date_input("End Date", today) 
-if end_date > today:     
+today = datetime.today().date()   # convert to just a date
+end_date = st.sidebar.date_input("End Date", today)
+
+# Ensure end_date is not in the future
+if end_date > today:
     end_date = today
 
 strategy = st.sidebar.selectbox(
