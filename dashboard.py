@@ -6,15 +6,15 @@ import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-# ------------------------------
+# =========================================================
 # Sidebar / Inputs
-# ------------------------------
+# =========================================================
 st.sidebar.title("AI Trading Dashboard")
 
 mode = st.sidebar.radio("Mode", ["Multi-Ticker", "Compare Strategies"])
 
 def sanitize_symbol(s: str) -> str:
-    # keep letters, numbers, dot, dash, caret
+    # Keep letters, numbers, dot, dash, caret; strip everything else
     return re.sub(r"[^A-Za-z0-9\.\-\^]", "", s).upper().strip()
 
 if mode == "Multi-Ticker":
@@ -27,22 +27,21 @@ else:
 start_date = st.sidebar.date_input("Start Date", (datetime.now() - timedelta(days=365)).date())
 today = datetime.today().date()
 end_date = st.sidebar.date_input("End Date", today)
-# clamp future end-date
 if end_date > today:
     end_date = today
 
 initial_cash = st.sidebar.number_input("Starting Cash ($)", value=10000, step=1000)
 
-# strategy params (visible in both modes so compare-mode uses them)
+# Strategy params (visible in both modes so Compare-mode can use them)
 fast = st.sidebar.slider("Fast SMA Window", 5, 50, 10)
 slow = st.sidebar.slider("Slow SMA Window", 20, 200, 30)
 rsi_window = st.sidebar.slider("RSI Window", 5, 30, 14)
 rsi_buy = st.sidebar.slider("RSI Buy Threshold", 10, 50, 30)
 rsi_sell = st.sidebar.slider("RSI Sell Threshold", 50, 90, 70)
 
-# ------------------------------
+# =========================================================
 # Utils
-# ------------------------------
+# =========================================================
 def flatten_cols(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
@@ -55,17 +54,16 @@ def to_scalar(x, default=None):
         return x.iloc[0] if isinstance(x, pd.Series) else x[0]
     return x
 
-# ------------------------------
+# =========================================================
 # Data Loader (defensive)
-# ------------------------------
+# =========================================================
 @st.cache_data
 def load_data(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     try:
-        # Explicitly set auto_adjust to avoid surprises; group_by='column' to avoid MultiIndex
         df = yf.download(
             ticker,
             start=pd.Timestamp(start),
-            end=pd.Timestamp(end) + pd.Timedelta(days=1),  # inclusive
+            end=pd.Timestamp(end) + pd.Timedelta(days=1),  # make end inclusive
             auto_adjust=False,
             progress=False,
             group_by="column",
@@ -76,26 +74,24 @@ def load_data(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFra
     if df is None or df.empty:
         return pd.DataFrame()
     df = flatten_cols(df)
-    # standardize column names capitalization just in case
-    rename_map = {c: c.title() for c in df.columns}  # open->Open, etc.
-    df = df.rename(columns=rename_map)
+    # standardize column names (Open, High, Low, Close, Volume, etc.)
+    df = df.rename(columns={c: c.title() for c in df.columns})
     return df
 
-# ------------------------------
+# =========================================================
 # Strategies (robust)
-# ------------------------------
+# =========================================================
 def pivot_strategy(df: pd.DataFrame) -> pd.DataFrame:
     df = flatten_cols(df.copy())
     req = {"High", "Low", "Close"}
     if not req.issubset(df.columns):
         return pd.DataFrame()
 
-    # compute pivots from prior day
+    # Compute pivots from prior day as Series (avoids DataFrame assignment error)
     pivot = (df["High"].shift(1) + df["Low"].shift(1) + df["Close"].shift(1)) / 3.0
     r1 = 2 * pivot - df["Low"].shift(1)
     s1 = 2 * pivot - df["High"].shift(1)
 
-    # assign as 1-D series (avoid DataFrame-to-column error)
     df["Pivot"] = pivot.astype(float)
     df["R1"] = r1.astype(float)
     df["S1"] = s1.astype(float)
@@ -133,9 +129,9 @@ def rsi_strategy(df: pd.DataFrame, window: int, buy_th: float, sell_th: float) -
     df["Signal"] = sig
     return df
 
-# ------------------------------
+# =========================================================
 # Backtest (scalar-safe)
-# ------------------------------
+# =========================================================
 def backtest(df: pd.DataFrame, cash: float):
     if df is None or df.empty or "Close" not in df.columns:
         return pd.DataFrame(), float(cash)
@@ -149,6 +145,7 @@ def backtest(df: pd.DataFrame, cash: float):
         price = to_scalar(row.get("Close", np.nan), default=np.nan)
         if pd.isna(price):
             continue
+
         if isinstance(action, str) and action == "BUY" and cash_balance > 0:
             qty = int(cash_balance // float(price))
             if qty > 0:
@@ -159,6 +156,7 @@ def backtest(df: pd.DataFrame, cash: float):
                     "Shares": qty, "Cash": cash_balance, "Position": position,
                     "Portfolio": cash_balance + position * float(price)
                 })
+
         elif isinstance(action, str) and action == "SELL" and position > 0:
             cash_balance += position * float(price)
             history.append({
@@ -171,10 +169,12 @@ def backtest(df: pd.DataFrame, cash: float):
     final_value = cash_balance + position * float(df["Close"].iloc[-1])
     return pd.DataFrame(history), float(final_value)
 
-# ------------------------------
-# Run per mode
-# ------------------------------
+# =========================================================
+# Run modes (Multi-Ticker / Compare)
+# =========================================================
 st.title("AI Trading Dashboard")
+
+exec_candidates = []  # collect latest actionable signals for the Execution panel
 
 if mode == "Multi-Ticker":
     strategy = st.sidebar.selectbox("Select Strategy", ["Pivot Points", "SMA Crossover", "RSI"])
@@ -184,12 +184,22 @@ if mode == "Multi-Ticker":
         data = load_data(tk, start_date, end_date)
         if data.empty:
             continue
+
         if strategy == "Pivot Points":
             data = pivot_strategy(data)
         elif strategy == "SMA Crossover":
             data = sma_strategy(data, fast, slow)
         else:
             data = rsi_strategy(data, rsi_window, rsi_buy, rsi_sell)
+
+        # build execution candidate from latest bar
+        if not data.empty and "Signal" in data and "Close" in data:
+            latest_idx = data.index[-1]
+            sig = str(data["Signal"].iloc[-1])
+            if sig in ("BUY", "SELL"):
+                price = float(data["Close"].iloc[-1])
+                ts_key = f"multi:{tk}:{strategy}:{latest_idx}"
+                exec_candidates.append({"symbol": tk, "signal": sig, "price": price, "ts_key": ts_key})
 
         trades, final_val = backtest(data, initial_cash)
         results[tk] = {"trades": trades, "final": final_val, "data": data}
@@ -218,7 +228,6 @@ if mode == "Multi-Ticker":
     for tk, res in results.items():
         st.subheader(f"{tk} - {strategy}")
         data, trades = res["data"], res["trades"]
-
         if data.empty:
             st.info("No data for this ticker.")
             continue
@@ -253,7 +262,7 @@ if mode == "Multi-Ticker":
             st.info("No trades executed for this ticker.")
 
 else:
-    # Compare Strategies for a single ticker
+    # Compare strategies for the single selected ticker
     tk = tickers[0]
     base = load_data(tk, start_date, end_date)
     if base.empty:
@@ -263,10 +272,23 @@ else:
     piv = pivot_strategy(base)
     sma = sma_strategy(base, fast, slow)
     rsi = rsi_strategy(base, rsi_window, rsi_buy, rsi_sell)
-
     strategies = {"Pivot Points": piv, "SMA Crossover": sma, "RSI": rsi}
-    results, equity_curves = {}, {}
 
+    # Choose first actionable strategy in priority order for execution candidate
+    for name in ["Pivot Points", "SMA Crossover", "RSI"]:
+        df = strategies.get(name)
+        if df is None or df.empty or "Signal" not in df or "Close" not in df:
+            continue
+        latest_idx = df.index[-1]
+        sig = str(df["Signal"].iloc[-1])
+        if sig in ("BUY", "SELL"):
+            price = float(df["Close"].iloc[-1])
+            ts_key = f"compare:{tk}:{name}:{latest_idx}"
+            exec_candidates.append({"symbol": tk, "signal": sig, "price": price, "ts_key": ts_key})
+            break
+
+    # Results & display
+    results, equity_curves = {}, {}
     for name, df in strategies.items():
         trades, final_val = backtest(df, initial_cash)
         results[name] = {"trades": trades, "final": final_val, "data": df}
@@ -297,6 +319,7 @@ else:
         if df.empty:
             st.info("No data for this strategy.")
             continue
+
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
             x=df.index, open=df.get("Open"), high=df.get("High"),
@@ -317,3 +340,143 @@ else:
                 st.line_chart(df["RSI"], height=180)
         fig.update_layout(title=f"{tk} Price with {name} Signals", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
+
+# =========================================================
+# Alpaca (alpaca-py) helpers
+# =========================================================
+def get_alpaca_client():
+    try:
+        from alpaca.trading.client import TradingClient
+    except Exception as e:
+        raise RuntimeError("alpaca-py not installed. Add 'alpaca-py' to requirements.txt") from e
+    cfg = st.secrets.get("alpaca", {})
+    key = cfg.get("key")
+    sec = cfg.get("secret")
+    paper = bool(cfg.get("paper", True))
+    if not key or not sec:
+        raise RuntimeError("Missing Alpaca keys in secrets.")
+    return TradingClient(key, sec, paper=paper)
+
+def alpaca_account_info(client):
+    try:
+        acct = client.get_account()
+        return {
+            "equity": float(acct.equity),
+            "cash": float(acct.cash),
+            "buying_power": float(acct.buying_power),
+            "status": acct.status,
+        }
+    except Exception as e:
+        st.error(f"Alpaca account error: {e}")
+        return None
+
+def alpaca_get_position_value(client, symbol):
+    try:
+        pos = client.get_position(symbol)
+        return float(pos.market_value)
+    except Exception:
+        return 0.0  # no position
+
+def alpaca_market_order(client, symbol, side, qty=None, notional=None, tif="day"):
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest
+    kwargs = {
+        "symbol": symbol,
+        "side": OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
+        "time_in_force": TimeInForce.DAY if tif == "day" else TimeInForce.GTC,
+    }
+    if notional is not None:
+        kwargs["notional"] = float(notional)
+    elif qty is not None:
+        kwargs["qty"] = int(qty)
+    else:
+        raise ValueError("Provide qty or notional for order sizing.")
+    req = MarketOrderRequest(**kwargs)
+    return client.submit_order(req)
+
+# =========================================================
+# Execution Panel (Paper Trading)
+# =========================================================
+st.header("Execution (Paper Trading)")
+
+colA, colB = st.columns([1,1])
+with colA:
+    arm = st.toggle("Arm Autotrader (safety switch)", value=False, help="Must be ON to send orders.")
+with colB:
+    use_notional = st.toggle("Size by Notional $ (vs. shares)", value=True)
+
+col1, col2, col3 = st.columns([1,1,1])
+with col1:
+    notional_usd = st.number_input("Notional per trade ($)", min_value=100.0, value=1000.0, step=100.0)
+with col2:
+    qty_shares = st.number_input("OR Shares per trade", min_value=0, value=0, step=1)
+with col3:
+    max_pos_usd = st.number_input("Max position per symbol ($ cap)", min_value=0.0, value=5000.0, step=500.0)
+
+# Duplicate protection per latest bar key
+if "last_exec_key" not in st.session_state:
+    st.session_state["last_exec_key"] = {}
+
+# Show latest actionable signals
+if exec_candidates:
+    st.write("Latest actionable signals:")
+    for c in exec_candidates:
+        st.write(f"- **{c['symbol']}**: {c['signal']} @ ${c['price']:.2f}")
+else:
+    st.info("No actionable signals on the latest bar.")
+
+# Connect to Alpaca (if secrets exist)
+client = None
+try:
+    client = get_alpaca_client()
+    acct = alpaca_account_info(client)
+    if acct:
+        st.caption(
+            f"Alpaca (paper) — Equity: ${acct['equity']:,.2f} | Cash: ${acct['cash']:,.2f} | "
+            f"BP: ${acct['buying_power']:,.2f} | Status: {acct['status']}"
+        )
+except Exception as e:
+    st.info(f"Alpaca disabled: {e}")
+
+can_execute = arm and (client is not None) and len(exec_candidates) > 0
+
+if st.button("Execute Latest Signal Now", disabled=not can_execute,
+             help="Sends market order(s) on the newest bar signals."):
+    if not arm:
+        st.warning("Autotrader is not armed.")
+    elif client is None:
+        st.error("Broker not connected.")
+    else:
+        executed_any = False
+        for c in exec_candidates:
+            key = c["ts_key"]
+            # skip duplicates for the same latest bar
+            if st.session_state["last_exec_key"].get(key):
+                st.info(f"Skipped duplicate: {key}")
+                continue
+
+            # cap by current position market value
+            current_val = alpaca_get_position_value(client, c["symbol"])
+            if max_pos_usd > 0 and current_val >= max_pos_usd:
+                st.warning(
+                    f"Skipped {c['symbol']}: position ${current_val:,.2f} is at/over cap ${max_pos_usd:,.2f}."
+                )
+                continue
+
+            # determine sizing
+            try:
+                if use_notional:
+                    alpaca_market_order(client, c["symbol"], c["signal"], notional=notional_usd)
+                else:
+                    if qty_shares <= 0:
+                        st.warning("Shares per trade is 0. Set shares or switch to notional.")
+                        continue
+                    alpaca_market_order(client, c["symbol"], c["signal"], qty=qty_shares)
+                st.success(f"Order sent: {c['symbol']} {c['signal']}")
+                st.session_state["last_exec_key"][key] = True
+                executed_any = True
+            except Exception as e:
+                st.error(f"Order error for {c['symbol']}: {e}")
+
+        if not executed_any:
+            st.info("No orders sent.")
