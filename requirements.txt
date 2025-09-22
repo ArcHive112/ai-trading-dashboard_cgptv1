@@ -3,4 +3,3 @@ pandas
 numpy
 yfinance
 plotly
-alpaca-trade-api
