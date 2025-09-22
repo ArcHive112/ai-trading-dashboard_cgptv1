@@ -11,10 +11,9 @@ from datetime import datetime, timedelta
 st.sidebar.title("AI Trading Dashboard")
 ticker = st.sidebar.text_input("Ticker Symbol", value="AAPL")
 start_date = st.sidebar.date_input("Start Date", datetime.now() - timedelta(days=180))
-
-today = datetime.today()
-end_date = st.sidebar.date_input("End Date", today)
-if end_date > today:
+today = datetime.today() 
+end_date = st.sidebar.date_input("End Date", today) 
+if end_date > today:     
     end_date = today
 
 strategy = st.sidebar.selectbox(
@@ -114,6 +113,7 @@ for date, row in data.iterrows():
 
 # Final portfolio value
 portfolio_value = cash + position * data["Close"].iloc[-1]
+
 trade_df = pd.DataFrame(trade_log)
 
 # ------------------------------
@@ -125,10 +125,8 @@ st.metric("Cash Remaining", f"${cash:,.2f}")
 st.metric("Shares Held", f"{position}")
 
 if not trade_df.empty:
-    sells = trade_df[trade_df["Action"] == "SELL"]
-    wins = (sells["Price"].diff() > 0).sum()
-    total_sells = len(sells)
-    win_rate = wins / total_sells if total_sells > 0 else 0
+    wins = (trade_df["Action"] == "SELL") & (trade_df["Price"].diff() > 0)
+    win_rate = wins.sum() / (trade_df["Action"] == "SELL").sum() if (trade_df["Action"] == "SELL").sum() > 0 else 0
     st.metric("Win Rate", f"{win_rate:.2%}")
 
 # ------------------------------
