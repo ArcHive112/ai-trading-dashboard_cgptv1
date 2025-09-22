@@ -23,8 +23,8 @@ def load_data(ticker, start, end):
 
 data = load_data(ticker, start_date, end_date)
 
-if data.empty:
-    st.error("No data found. Check ticker symbol or date range.")
+if data is None or data.empty:
+    st.error("No data found. Please check ticker symbol or date range.")
     st.stop()
 
 # ------------------------------
@@ -32,6 +32,9 @@ if data.empty:
 # ------------------------------
 def calculate_pivots(df):
     df = df.copy()
+    if df.empty:
+        return df
+    
     df["Pivot"] = (df["High"].shift(1) + df["Low"].shift(1) + df["Close"].shift(1)) / 3
     df["R1"] = 2 * df["Pivot"] - df["Low"].shift(1)
     df["S1"] = 2 * df["Pivot"] - df["High"].shift(1)
@@ -42,6 +45,10 @@ def calculate_pivots(df):
     return df
 
 data = calculate_pivots(data)
+
+if data.empty:
+    st.error("Could not calculate pivots — try a different ticker or range.")
+    st.stop()
 
 # ------------------------------
 # Trade Journal (placeholder)
